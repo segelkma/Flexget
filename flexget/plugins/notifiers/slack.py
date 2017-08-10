@@ -11,20 +11,24 @@ from flexget.utils.requests import Session as RequestSession
 
 requests = RequestSession(max_retries=3)
 
-__name__ = 'slack'
+plugin_name = 'slack'
 
-log = logging.getLogger(__name__)
+log = logging.getLogger(plugin_name)
 
 
 class SlackNotifier(object):
     """
     Example:
 
-      slack:
-        web_hook_url: <string>
-        [channel: <string>] (override channel, use "@username" or "#channel")
-        [username: <string>] (override username)
-        [icon_emoji: <string>] (override emoji icon
+      notify:
+        entries:
+          via:
+            - slack:
+                web_hook_url: <string>
+                [channel: <string>] (override channel, use "@username" or "#channel")
+                [username: <string>] (override username)
+                [icon_emoji: <string>] (override emoji icon)
+                [icon_url: <string>] (override emoji icon)
 
     """
     schema = {
@@ -32,9 +36,14 @@ class SlackNotifier(object):
         'properties': {
             'web_hook_url': {'type': 'string'},
             'channel': {'type': 'string'},
-            'username': {'type': 'string'},
-            'icon_emoji': {'type': 'string'}
+            'username': {'type': 'string', 'default': 'Flexget'},
+            'icon_emoji': {'type': 'string'},
+            'icon_url': {'type': 'string', 'format': 'url'}
         },
+        'not': {
+            'required': ['icon_emoji', 'icon_url']
+        },
+        'error_not': 'Can only use one of \'icon_emoji\' or \'icon_url\'',
         'required': ['web_hook_url'],
         'additionalProperties': False
     }
@@ -45,7 +54,9 @@ class SlackNotifier(object):
         """
         notification = {'text': message, 'channel': config.get('channel'), 'username': config.get('username')}
         if config.get('icon_emoji'):
-            notification['icon-emoji'] = ':%s:' % config['icon_emoji'].strip(':')
+            notification['icon_emoji'] = ':%s:' % config['icon_emoji'].strip(':')
+        if config.get('icon_url'):
+            notification['icon_url'] = config['icon_url']
 
         try:
             requests.post(config['web_hook_url'], json=notification)
@@ -55,4 +66,4 @@ class SlackNotifier(object):
 
 @event('plugin.register')
 def register_plugin():
-    plugin.register(SlackNotifier, __name__, api_ver=2, interfaces=['notifiers'])
+    plugin.register(SlackNotifier, plugin_name, api_ver=2, interfaces=['notifiers'])

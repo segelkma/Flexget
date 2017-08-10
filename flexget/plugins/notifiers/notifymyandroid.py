@@ -11,8 +11,8 @@ from flexget.event import event
 from flexget.plugin import PluginWarning
 from requests.exceptions import RequestException
 
-__name__ = 'notifymyandroid'
-log = logging.getLogger(__name__)
+plugin_name = 'notifymyandroid'
+log = logging.getLogger(plugin_name)
 
 NOTIFYMYANDROID_URL = 'https://www.notifymyandroid.com/publicapi/notify'
 
@@ -21,11 +21,14 @@ class NotifyMyAndroidNotifier(object):
     """
     Example::
 
-      notifymyandroid:
-        apikey: xxxxxxx
-        [application: application name, default FlexGet]
-        [event: event title, default New Release]
-        [priority: -2 - 2 (2 = highest), default 0]
+      notify:
+        entries:
+          via:
+            - notifymyandroid:
+                apikey: xxxxxxx
+                [application: application name, default FlexGet]
+                [event: event title, default New Release]
+                [priority: -2 - 2 (2 = highest), default 0]
 
     Configuration parameters are also supported from entries (eg. through set).
     """
@@ -79,4 +82,4 @@ class NotifyMyAndroidNotifier(object):
 
 @event('plugin.register')
 def register_plugin():
-    plugin.register(NotifyMyAndroidNotifier, __name__, api_ver=2, interfaces=['notifiers'])
+    plugin.register(NotifyMyAndroidNotifier, plugin_name, api_ver=2, interfaces=['notifiers'])

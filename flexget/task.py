@@ -18,12 +18,11 @@ from flexget.logger import capture_output
 from flexget.manager import Session
 from flexget.plugin import plugins as all_plugins
 from flexget.plugin import (
-    DependencyError, get_plugins, phase_methods, plugin_schemas, PluginError, PluginWarning, task_phases,
-    suppress_abort_phases)
+    DependencyError, get_plugins, phase_methods, plugin_schemas, PluginError, PluginWarning, task_phases)
 from flexget.utils import requests
 from flexget.utils.database import with_session
 from flexget.utils.simple_persistence import SimpleTaskPersistence
-from flexget.utils.tools import get_config_hash
+from flexget.utils.tools import get_config_hash, MergeException, merge_dict_from_to
 from flexget.utils.template import render_from_task, FlexGetTemplate
 
 log = logging.getLogger('task')
@@ -460,6 +459,9 @@ class Task(object):
                 finally:
                     fire_event('task.execute.after_plugin', self, plugin.name)
                 self.session = None
+        # check config hash for changes at the end of 'prepare' phase
+        if phase == 'prepare':
+            self.check_config_hash()
 
     def __run_plugin(self, plugin, phase, args=None, kwargs=None):
         """
@@ -478,21 +480,12 @@ class Task(object):
         if kwargs is None:
             kwargs = {}
 
-        def abort_or_suppress(msg, **kw):
-            if phase in suppress_abort_phases:
-                log.error('Suppressing task abort during %s phase: %s', phase, msg)
-                return
-            self.abort(msg, **kw)
-
         # log.trace('Running %s method %s' % (keyword, method))
         # call the plugin
         try:
             return method(*args, **kwargs)
-        except TaskAbort as e:
-            if phase in suppress_abort_phases:
-                abort_or_suppress(e.reason)
-            else:
-                raise
+        except TaskAbort:
+            raise
         except PluginWarning as warn:
             # check if this warning should be logged only once (may keep repeating)
             if warn.kwargs.get('log_once', False):
@@ -504,26 +497,26 @@ class Task(object):
             msg = ('Plugin %s tried to create non-unicode compatible entry (key: %s, value: %r)' %
                    (keyword, eue.key, eue.value))
             log.critical(msg)
-            abort_or_suppress(msg)
+            self.abort(msg)
         except PluginError as err:
             err.log.critical(err.value)
-            abort_or_suppress(err.value)
+            self.abort(err.value)
         except DependencyError as e:
             msg = ('Plugin `%s` cannot be used because dependency `%s` is missing.' %
                    (keyword, e.missing))
             log.critical(msg)
             log.debug(e.message)
-            abort_or_suppress(msg)
+            self.abort(msg)
         except Warning as e:
             # If warnings have been elevated to errors
             msg = 'Warning during plugin %s: %s' % (keyword, e)
             log.exception(msg)
-            abort_or_suppress(msg)
+            self.abort(msg)
         except Exception as e:
             msg = 'BUG: Unhandled error in plugin %s: %s' % (keyword, e)
             log.critical(msg)
             traceback = self.manager.crash_report()
-            abort_or_suppress(msg, traceback=traceback)
+            self.abort(msg, traceback=traceback)
 
     def rerun(self, plugin=None, reason=None):
         """
@@ -551,15 +544,17 @@ class Task(object):
         """
         self.config_modified = True
 
-    def is_config_modified(self, last_hash):
-        """
-        Checks the task's config hash. Returns True/False depending on config has been modified and the config hash
+    def merge_config(self, new_config):
+        try:
+            merge_dict_from_to(new_config, self.config)
+        except MergeException as e:
+            raise PluginError('Failed to merge configs for task %s: %s' % (self.name, e))
 
-        :param str last_hash:
-        :return bool, str: config modified and config hash
+    def check_config_hash(self):
+        """
+        Checks the task's config hash and updates the hash if necessary.
         """
         # Save current config hash and set config_modified flag
-        config_modified = False
         config_hash = get_config_hash(self.config)
         if self.is_rerun:
             # Restore the config to state right after start phase
@@ -567,15 +562,14 @@ class Task(object):
                 self.config = copy.deepcopy(self.prepared_config)
             else:
                 log.error('BUG: No prepared_config on rerun, please report.')
-                config_modified = False
-        elif not last_hash:
-            config_modified = True
-        elif last_hash.hash != config_hash:
-            config_modified = True
-            last_hash.hash = config_hash
-        else:
-            config_modified = False
-        return config_modified, config_hash
+        with Session() as session:
+            last_hash = session.query(TaskConfigHash).filter(TaskConfigHash.task == self.name).first()
+            if not last_hash:
+                session.add(TaskConfigHash(task=self.name, hash=config_hash))
+                self.config_changed()
+            elif last_hash.hash != config_hash:
+                last_hash.hash = config_hash
+                self.config_changed()
 
     def _execute(self):
         """Executes the task without rerunning."""
@@ -597,12 +591,6 @@ class Task(object):
             self.disable_phase('input')
             self.all_entries.extend(copy.deepcopy(self.options.inject))
 
-        with Session() as session:
-            last_hash = session.query(TaskConfigHash).filter(TaskConfigHash.task == self.name).first()
-            self.config_modified, config_hash = self.is_config_modified(last_hash)
-            if self.config_modified:
-                session.add(TaskConfigHash(task=self.name, hash=config_hash))
-
         # run phases
         try:
             for phase in task_phases:
@@ -613,8 +601,8 @@ class Task(object):
                             log.info('Plugin %s is not executed because %s phase is disabled (e.g. --test)' %
                                      (plugin.name, phase))
                     continue
-                if phase == 'start' and self.is_rerun:
-                    log.debug('skipping task_start during rerun')
+                if phase in ('start', 'prepare') and self.is_rerun:
+                    log.debug('skipping phase %s during rerun', phase)
                 elif phase == 'exit' and self._rerun and self._rerun_count < self.max_reruns:
                     log.debug('not running task_exit yet because task will rerun')
                 else:

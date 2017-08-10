@@ -1,15 +1,15 @@
 from __future__ import unicode_literals, division, absolute_import
 from builtins import *  # noqa pylint: disable=unused-import, redefined-builtin
-from flexget.plugin import PluginWarning
 from future.utils import native_str
 
 from distutils.version import LooseVersion
 
+from sqlalchemy import Column, Integer, String
+
 from flexget import db_schema, plugin
 from flexget.event import event
 from flexget.manager import Session
-
-from sqlalchemy import Column, Integer, String
+from flexget.plugin import PluginWarning, PluginError
 
 try:
     import telegram
@@ -74,16 +74,20 @@ class TelegramNotifier(object):
     Configuration example::
 
     my-task:
-      telegram:
-        bot_token: token
-        template: {{title}}
-        use_markdown: no
-        recipients:
-          - username: my-user-name
-          - group: my-group-name
-          - fullname:
-              first: my-first-name
-              sur: my-sur-name
+      notify:
+        title: {{title}}
+        message: {{title}}
+        entries:
+          via:
+            telegram:
+              bot_token: token
+              use_markdown: no
+              recipients:
+                - username: my-user-name
+                - group: my-group-name
+                - fullname:
+                    first: my-first-name
+                    sur: my-sur-name
 
 
     Bootstrapping and testing the bot::
@@ -98,9 +102,6 @@ class TelegramNotifier(object):
 
     You may use any combination of recipients types (`username`, `group` or `fullname`) - 0 or more of each (but you
     need at least one total...).
-
-    `template`::
-    Optional. The template from the example is the default.
 
     `parse_mode`::
     Optional. Whether the template uses `markdown` or `html` formatting.
@@ -267,7 +268,7 @@ class TelegramNotifier(object):
         self.log.debug('chat_ids=%s', chat_ids)
 
         if not chat_ids:
-            self.log.warning('no chat id found, try manually sending the bot any message to initialize the chat')
+            raise PluginError('no chat id found, try manually sending the bot any message to initialize the chat')
         else:
             if usernames:
                 self.log.warning('no chat id found for usernames: %s', usernames)
@@ -405,8 +406,16 @@ class TelegramNotifier(object):
         usernames = dict()
         fullnames = dict()
         groups = dict()
+        for update in updates:
+            if update.message:
+                chat = update.message.chat
+            elif update.edited_message:
+                chat = update.edited_message.chat
+            elif update.channel_post:
+                chat = update.channel_post.chat
+            else:
+                raise PluginError('Unknown update type encountered: %s' % update)
 
-        for chat in (x.message.chat for x in updates):
             if chat.type == 'private':
                 usernames[chat.username] = chat
                 fullnames[(chat.first_name, chat.last_name)] = chat

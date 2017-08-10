@@ -10,8 +10,8 @@ from flexget.config_schema import one_or_more
 from flexget.utils.requests import Session as RequestSession, TimedLimiter
 from requests.exceptions import RequestException
 
-__name__ = 'join'
-log = logging.getLogger(__name__)
+plugin_name = 'join'
+log = logging.getLogger(plugin_name)
 
 requests = RequestSession(max_retries=3)
 requests.add_domain_limiter(TimedLimiter('appspot.com', '5 seconds'))
@@ -23,13 +23,16 @@ class JoinNotifier(object):
     """
     Example::
 
-      join:
-        [api_key: <API_KEY> (your join api key. Only required for 'group' notifications)]
-        [group: <GROUP_NAME> (name of group of join devices to notify. 'all', 'android', etc.)
-        [device: <DEVICE_ID> (can also be a list of device ids)]
-        [url: <NOTIFICATION_URL>]
-        [sms_number: <NOTIFICATION_SMS_NUMBER>]
-        [icon: <NOTIFICATION_ICON>]
+      notify:
+        entries:
+          via:
+            - join:
+                [api_key: <API_KEY> (your join api key. Only required for 'group' notifications)]
+                [group: <GROUP_NAME> (name of group of join devices to notify. 'all', 'android', etc.)
+                [device: <DEVICE_ID> (can also be a list of device ids)]
+                [url: <NOTIFICATION_URL>]
+                [sms_number: <NOTIFICATION_SMS_NUMBER>]
+                [icon: <NOTIFICATION_ICON>]
     """
     schema = {
         'type': 'object',
@@ -40,20 +43,17 @@ class JoinNotifier(object):
                 'enum': ['all', 'android', 'chrome', 'windows10', 'phone', 'tablet', 'pc']
             },
             'device': one_or_more({'type': 'string'}),
+            'device_name': one_or_more({'type': 'string'}),
             'url': {'type': 'string'},
             'icon': {'type': 'string'},
             'sms_number': {'type': 'string'},
             'priority': {'type': 'integer', 'minimum': -2, 'maximum': 2}
         },
-        'dependencies': {
-            'group': ['api_key']
+        'required': ['api_key'],
+        'not': {
+            'required': ['device', 'group']
         },
-        'error_dependencies': '`api_key` is required to use Join `group` notifications',
-        'oneOf': [
-            {'required': ['device']},
-            {'required': ['api_key']},
-        ],
-        'error_oneOf': 'Either a `device` to notify, or an `api_key` must be specified, and not both',
+        'error_not': 'Cannot select both \'device\' and \'group\'',
         'additionalProperties': False
     }
 
@@ -62,16 +62,22 @@ class JoinNotifier(object):
         Send Join notifications.
         """
         notification = {'title': title, 'text': message, 'url': config.get('url'),
-                        'icon': config.get('icon'), 'priority': config.get('priority')}
-        if config.get('api_key'):
-            config.setdefault('group', 'all')
-            notification['apikey'] = config['api_key']
-            notification['deviceId'] = 'group.' + config['group']
-        else:
+                        'icon': config.get('icon'), 'priority': config.get('priority'), 'apikey': config['api_key']}
+        if config.get('device'):
             if isinstance(config['device'], list):
                 notification['deviceIds'] = ','.join(config['device'])
             else:
                 notification['deviceId'] = config['device']
+        elif config.get('group'):
+            notification['deviceId'] = 'group.' + config['group']
+        else:
+            notification['deviceId'] = 'group.all'
+
+        if config.get('device_name'):
+            if isinstance(config['device_name'], list):
+                notification['deviceNames'] = ','.join(config['device_name'])
+            else:
+                notification['deviceNames'] = config['device_name']
 
         if config.get('sms_number'):
             notification['smsnumber'] = config['sms_number']
@@ -89,4 +95,4 @@ class JoinNotifier(object):
 
 @event('plugin.register')
 def register_plugin():
-    plugin.register(JoinNotifier, __name__, api_ver=2, interfaces=['notifiers'])
+    plugin.register(JoinNotifier, plugin_name, api_ver=2, interfaces=['notifiers'])

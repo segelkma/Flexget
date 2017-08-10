@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import unicode_literals, division, absolute_import
 from builtins import *  # noqa pylint: disable=unused-import, redefined-builtin
 
@@ -6,15 +7,20 @@ import logging
 from flexget import plugin
 from flexget.entry import Entry
 from flexget.event import event
+from flexget.utils.requests import Session as RequestSession, TimedLimiter
 from flexget.utils.soup import get_soup
+from requests.exceptions import HTTPError, RequestException
 
 from datetime import date, timedelta
 
 import unicodedata
-import requests
 import re
 
 log = logging.getLogger('search_npo')
+
+requests = RequestSession(max_retries=3)
+requests.add_domain_limiter(TimedLimiter('npo.nl', '5 seconds'))
+
 fragment_regex = re.compile('[A-Z][^/]+/')
 date_regex = re.compile('([1-3]?[0-9]) ([a-z]{3})(?: ([0-9]{4})|\W)')
 days_ago_regex = re.compile('([0-9]+) dagen geleden')
@@ -101,7 +107,7 @@ class NPOWatchlist(object):
             return date.today()
 
     def _get_page(self, task, config, url):
-        login_response = task.requests.get(url)
+        login_response = requests.get(url)
         if login_response.url == url:
             log.debug('Already logged in')
             return login_response
@@ -115,7 +121,7 @@ class NPOWatchlist(object):
         password = config.get('password')
 
         try:
-            profile_response = task.requests.post('https://mijn.npo.nl/sessions',
+            profile_response = requests.post('https://mijn.npo.nl/sessions',
                                                   {'authenticity_token': token,
                                                    'email': email,
                                                    'password': password})
@@ -139,11 +145,11 @@ class NPOWatchlist(object):
         self.csrf_token = page.find('meta', attrs={'name': 'csrf-token'})['content']
 
         entries = list()
-        for listItem in page.findAll('div', class_='watch-list-item'):
-            url = listItem.find('a')['href']
-            series_name = next(listItem.find('h3').stripped_strings)
-            remove_url = listItem.find('a', class_='unwatch-confirm')['href']
-            entry_date = self._parse_date(listItem.find('span', class_='global__content-info').text)
+        for list_item in page.findAll('div', class_='watch-list-item'):
+            url = list_item.find('a')['href']
+            series_name = next(list_item.find('h3').stripped_strings)
+            remove_url = list_item.find('a', class_='unwatch-confirm')['href']
+            entry_date = self._parse_date(list_item.find('span', class_='global__content-info').text)
 
             episode_id = url.split('/')[-1]
             title = '{} ({})'.format(series_name, episode_id)
@@ -155,7 +161,7 @@ class NPOWatchlist(object):
             e['series_name_plain'] = self._convert_plain(series_name)
             e['series_date'] = entry_date
             e['series_id_type'] = 'date'
-            e['description'] = listItem.find('p').text
+            e['description'] = list_item.find('p').text
             e['remove_url'] = self._prefix_url('https://mijn.npo.nl', remove_url)
 
             if config.get('remove_accepted'):
@@ -167,9 +173,9 @@ class NPOWatchlist(object):
 
     def _get_series_info(self, task, config, series_name, series_url):
         log.info('Retrieving series info for %s', series_name)
-        response = task.requests.get(series_url)
+        response = requests.get(series_url)
         page = get_soup(response.content)
-        tvseries = page.find('div', itemscope='itemscope', itemtype='http://schema.org/TVSeries')
+        tvseries = page.find('div', itemscope='itemscope', itemtype='https://schema.org/TVSeries')
         series_info = Entry()  # create a stub to store the common values for all episodes of this series
         series_info['npo_url'] = tvseries.find('a', itemprop='url')['href']
         series_info['npo_name'] = tvseries.find('span', itemprop='name').contents[0]
@@ -178,10 +184,9 @@ class NPOWatchlist(object):
 
         return series_info
 
-
     def _get_series_episodes(self, task, config, series_name, series_url, series_info):
         log.info('Retrieving new episodes for %s', series_name)
-        response = task.requests.get(series_url + '/search?media_type=broadcast')  # only shows full episodes
+        response = requests.get(series_url + '/search?media_type=broadcast')  # only shows full episodes
         page = get_soup(response.content)
 
         if page.find('div', class_='npo3-show-items'):
@@ -200,34 +205,37 @@ class NPOWatchlist(object):
         max_age = config.get('max_episode_age_days')
 
         entries = list()
-        for listItem in page.findAll('div', class_='item'):
-            url = listItem.find('a')['href']
-            title = listItem.find('h3').text
+        for list_item in page.findAll('div', class_='item'):
+            episode_runtime = list_item.find('div', class_='md-value')
+            if episode_runtime:  # if there is no md-value, it is not an episode
+                url = list_item.find('a')['href']
+                title = list_item.find('h3').text
 
-            episode_id = url.split('/')[-1]
-            title = '{} ({})'.format(title, episode_id)
+                episode_id = url.split('/')[-1]
+                title = '{} ({})'.format(title, episode_id)
 
-            entry_date = list(listItem.find('h4').stripped_strings)[1]
-            entry_date = self._parse_date(entry_date)
-            if max_age >= 0 and (date.today() - entry_date) > timedelta(days=max_age):
-                log.debug('Skipping %s, aired on %s', title, entry_date)
-                continue
+                entry_date = list(list_item.find('h4').stripped_strings)[1]
+                entry_date = self._parse_date(entry_date)
+                if max_age >= 0 and (date.today() - entry_date) > timedelta(days=max_age):
+                    log.debug('Skipping %s, aired on %s', title, entry_date)
+                    continue
 
-            e = Entry()
-            e['url'] = self._prefix_url('http://www.npo.nl', url)
-            e['title'] = title
-            e['series_name'] = series_name
-            e['series_name_plain'] = self._convert_plain(series_name)
-            e['series_date'] = entry_date
-            e['series_id_type'] = 'date'
-            e['description'] = listItem.find('p').text
-            e['npo_url'] = series_info['npo_url']
-            e['npo_name'] = series_info['npo_name']
-            e['npo_description'] = series_info['npo_description']
-            e['npo_language'] = series_info['npo_language']
-            e['language'] = series_info['npo_language']  # set language field for (tvdb_)lookup
+                e = Entry()
+                e['url'] = self._prefix_url('http://www.npo.nl', url)
+                e['title'] = title
+                e['series_name'] = series_name
+                e['series_name_plain'] = self._convert_plain(series_name)
+                e['series_date'] = entry_date
+                e['series_id_type'] = 'date'
+                e['description'] = list_item.find('p').text
+                e['npo_url'] = series_info['npo_url']
+                e['npo_name'] = series_info['npo_name']
+                e['npo_description'] = series_info['npo_description']
+                e['npo_language'] = series_info['npo_language']
+                e['npo_runtime'] = episode_runtime.contents[0].split(':')[0].strip()  # only count full minutes
+                e['language'] = series_info['npo_language']  # set language field for (tvdb_)lookup
 
-            entries.append(e)
+                entries.append(e)
 
         return entries
 
@@ -235,22 +243,22 @@ class NPOWatchlist(object):
         max_age = config.get('max_episode_age_days')
 
         entries = list()
-        for listItem in page.findAll('div', class_='list-item'):
-            url = listItem.find('a')['href']
-            title = next(listItem.find('h4').stripped_strings)
-            subtitle = listItem.find('h5').text
+        for list_item in page.findAll('div', class_='list-item'):
+            url = list_item.find('a')['href']
+            title = next(list_item.find('h4').stripped_strings)
+            subtitle = list_item.find('h5').text.split('·')
 
             episode_id = url.split('/')[-1]
             title = '{} ({})'.format(title, episode_id)
 
-            if listItem.find('div', class_='program-not-available'):
+            if list_item.find('div', class_='program-not-available'):
                 log.debug('Skipping %s, no longer available', title)
                 continue
             elif fragment_regex.search(url):
                 log.debug('Skipping fragment: %s', title)
                 continue
 
-            entry_date = self._parse_date(subtitle)
+            entry_date = self._parse_date(subtitle[0])
             if max_age >= 0 and (date.today() - entry_date) > timedelta(days=max_age):
                 log.debug('Skipping %s, aired on %s', title, entry_date)
                 continue
@@ -262,11 +270,13 @@ class NPOWatchlist(object):
             e['series_name_plain'] = self._convert_plain(series_name)
             e['series_date'] = entry_date
             e['series_id_type'] = 'date'
-            e['description'] = listItem.find('p').text
+            e['description'] = list_item.find('p').text
             e['npo_url'] = series_info['npo_url']
             e['npo_name'] = series_info['npo_name']
             e['npo_description'] = series_info['npo_description']
             e['npo_language'] = series_info['npo_language']
+            if len(subtitle) > 1:  # if runtime is available in the subtext
+                e['npo_runtime'] = subtitle[1].strip('min').strip()
             e['language'] = series_info['npo_language']  # set language field for (tvdb_)lookup
 
             entries.append(e)
@@ -282,17 +292,17 @@ class NPOWatchlist(object):
         page = get_soup(response.content)
 
         entries = list()
-        for listItem in page.findAll('div', class_='thumb-item'):
-            url = listItem.find('a')['href']
+        for list_item in page.findAll('div', class_='thumb-item'):
+            url = list_item.find('a')['href']
 
             if url == '/profiel/favorieten/favorieten-toevoegen':
                 log.debug("Skipping 'add favorite' button")
                 continue
 
             url = self._prefix_url('https://mijn.npo.nl', url)
-            series_name = next(listItem.find('div', class_='thumb-item__title').stripped_strings)
+            series_name = next(list_item.find('div', class_='thumb-item__title').stripped_strings)
 
-            last_aired_text = listItem.find('div', class_='thumb-item__subtitle').text
+            last_aired_text = list_item.find('div', class_='thumb-item__subtitle').text
             last_aired_text = last_aired_text.rsplit('Laatste aflevering ')[-1]
             last_aired = self._parse_date(last_aired_text)
 
@@ -335,7 +345,7 @@ class NPOWatchlist(object):
             }
 
             try:
-                delete_response = task.requests.delete(e['remove_url'], headers=headers)
+                delete_response = requests.delete(e['remove_url'], headers=headers)
             except requests.HTTPError as error:
                 log.error('Failed to remove %s, got status %s', e['title'], error.response.status_code)
             else:

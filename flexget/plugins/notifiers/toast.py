@@ -1,17 +1,35 @@
 from __future__ import unicode_literals, division, absolute_import
 import logging
 import sys
+import os
 
 from flexget import plugin
 from flexget.event import event
 from flexget.plugin import PluginWarning, DependencyError
 
-__name__ = 'toast'
+plugin_name = 'toast'
 
-log = logging.getLogger(__name__)
+log = logging.getLogger(plugin_name)
 
 
 class NotifyToast(object):
+    """
+    Sends messages via local notification system. You must have a notification system like dbus for Linux.
+    Preliminary support for Windows notifications. Not heavily tested yet.
+
+    Examples:
+
+      notify:
+        entries:
+          via:
+            - toast: yes
+
+      notify:
+        entries:
+          via:
+            - toast:
+                timeout: 5
+    """
     schema = {
         'anyOf': [
             {'type': 'boolean', 'enum': [True]},
@@ -19,6 +37,7 @@ class NotifyToast(object):
                 'type': 'object',
                 'properties': {
                     'timeout': {'type': 'integer'},
+                    'url': {'type': 'string'},
                 },
                 'additionalProperties': False
             }
@@ -32,7 +51,29 @@ class NotifyToast(object):
         if not isinstance(config, dict):
             config = {}
         config.setdefault('timeout', 4)
+        config.setdefault('url', '')
         return config
+
+    def mac_notify(self, title, message, config):
+        config = self.prepare_config(config)
+        try:
+            from pync import Notifier
+        except ImportError as e:
+            log.debug('Error importing pync: %s', e)
+            raise DependencyError(plugin_name, 'pync', 'pync module required. ImportError: %s' % e)
+
+        icon_path = None
+        try:
+            import flexget.ui
+            icon_path = os.path.join(flexget.ui.__path__[0], 'src', 'favicon.ico')
+        except Exception as e:
+            log.debug('Error trying to get flexget icon from webui folder: %s', e)
+
+        try:
+            Notifier.notify(message, subtitle=title, title='FlexGet Notification', appIcon=icon_path,
+                            timeout=config['timeout'], open=config.get('url'))
+        except Exception as e:
+            raise PluginWarning('Cannot send a notification: %s' % e)
 
     def linux_notify(self, title, message, config):
         config = self.prepare_config(config)
@@ -40,7 +81,7 @@ class NotifyToast(object):
             from gi.repository import Notify
         except ImportError as e:
             log.debug('Error importing Notify: %s', e)
-            raise DependencyError(__name__, 'gi.repository', 'Notify module required. ImportError: %s' % e)
+            raise DependencyError(plugin_name, 'gi.repository', 'Notify module required. ImportError: %s' % e)
 
         if not Notify.init("Flexget"):
             raise PluginWarning('Unable to init libnotify.')
@@ -62,7 +103,7 @@ class NotifyToast(object):
                                   NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, RegisterClass, Shell_NotifyIcon,
                                   UpdateWindow, WNDCLASS)
         except ImportError:
-            raise DependencyError(__name__, 'pypiwin32', 'pywin32 module is required for desktop notifications on '
+            raise DependencyError(plugin_name, 'pypiwin32', 'pywin32 module is required for desktop notifications on '
                                                          'windows. You can install it with `pip install pypiwin32`')
 
         # Register the window class.
@@ -81,10 +122,10 @@ class NotifyToast(object):
         icon_flags = LR_LOADFROMFILE | LR_DEFAULTSIZE
         try:
             import flexget.ui
-            icon_path = flexget.ui.__path__[0] + '\\src\\favicon.ico'
+            icon_path = os.path.join(flexget.ui.__path__[0], 'src', 'favicon.ico')
             hicon = LoadImage(hinst, icon_path, IMAGE_ICON, 0, 0, icon_flags)
         except Exception as e:
-            logging.debug('Error trying to get flexget icon from webui folder: %s', e)
+            log.debug('Error trying to get flexget icon from webui folder: %s', e)
 
         # Taskbar icon
         flags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_INFO
@@ -93,10 +134,12 @@ class NotifyToast(object):
 
     if sys.platform.startswith('win'):
         notify = windows_notify
+    elif sys.platform == 'darwin':
+        notify = mac_notify
     else:
         notify = linux_notify
 
 
 @event('plugin.register')
 def register_plugin():
-    plugin.register(NotifyToast, __name__, api_ver=2, interfaces=['notifiers'])
+    plugin.register(NotifyToast, plugin_name, api_ver=2, interfaces=['notifiers'])
